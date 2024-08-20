@@ -1,77 +1,85 @@
-import fs from "fs";
-import https from "https";
+import findUp from "find-up";
+import * as fs from "fs-extra";
+import type yargs from "yargs";
+import install from "./install";
+import list, { PackageJson } from "./list";
+import * as lock from "./lock";
+import * as log from "./log";
+import * as utils from "./utils";
 import path from "path";
-import tar from "tar";
-
 /**
  * A client for the NPM registry API.
  */
+
 export class NpmRegistryClient {
-  /**
-   * Request package information from the NPM registry API as described [here](https://github.com/npm/registry/blob/main/docs/REGISTRY-API.md#getpackageversion)
-   *
-   * @param name The name of the package to be downloaded
-   * @param absoluteVersion The absolute (exact) version of the package to be downloaded
-   * @returns Information about the package
-   */
-  async getPackageInfo(name: string, absoluteVersion: string): Promise<any> {
-    const resp = await fetch(
-      `https://registry.npmjs.org/${name}/${absoluteVersion}`,
-      {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-        },
-      }
-    );
-    const data = await resp.json();
-    return data;
-  }
+  static async pm(args: yargs.Arguments) {
+    // Find and read the `package.json`.
+    const jsonPath = (await findUp("package.json"))!;
 
-  async downloadTarball(
-    name: string,
-    absoluteVersion: string,
-    downloadToPath: string
-  ): Promise<void> {
-    const url = `https://registry.npmjs.org/${name}/-/${name}-${absoluteVersion}.tgz`;
-    await new Promise((resolve, reject) => {
-      const fileStream = fs.createWriteStream(downloadToPath);
+    const root = await fs.readJson(jsonPath);
 
-      https
-        .get(url, (response) => {
-          response.pipe(fileStream);
+    const additionalPackages = args._.slice(1) as string[];
+    if (additionalPackages.length) {
+      if (args["save-dev"] || args.dev) {
+        root.devDependencies = root.devDependencies || {};
 
-          fileStream.on("finish", () => {
-            fileStream.close();
-            resolve(null);
-          });
-        })
-        .on("error", (error) => {
-          fileStream.close();
-          fs.unlink(downloadToPath, () => {}); // Delete the file if an error occurs
-          console.error(
-            `Error downloading package ${name}@${absoluteVersion}:`,
-            error
-          );
-          reject(error);
+        additionalPackages.forEach((pkg) => {
+          const [name, version] = pkg.split("@");
+          root.devDependencies[name] = version ? `^${version}` : "";
         });
-    });
+      } else {
+        root.dependencies = root.dependencies || {};
 
-    // Extract the tarball
-    const targetDir = path.dirname(downloadToPath);
-    try {
-      await tar.extract({
-        file: downloadToPath,
-        cwd: targetDir,
-      });
-    } catch (e) {
-      console.error(`Error extracting package ${name}@${absoluteVersion}:`, e);
-      return;
-    } finally {
-      // Delete the tarball
-      fs.unlinkSync(downloadToPath);
+        additionalPackages.forEach((pkg) => {
+          const [name, version] = pkg.split("@");
+          root.dependencies[name] = version ? `^${version}` : "";
+        });
+      }
     }
 
-    fs.renameSync(path.join(targetDir, "package"), downloadToPath);
+    /*
+     * In production mode,
+     * we just need to resolve production dependencies.
+     */
+    if (args.production) {
+      delete root.devDependencies;
+    }
+
+    // Read the lock file if exists
+    await lock.readLock();
+
+    // Generate the dependencies information.
+    const info = await list(root);
+
+    // Save the lock file asynchronously.
+    lock.writeLock();
+
+    /*
+     * Prepare for the progress bar.
+     * Note that we re-compute the number of packages.
+     * Because of the duplication,
+     * number of resolved packages is not equivalent to
+     * the number of packages to be installed.
+     */
+    log.prepareInstall(
+      Object.keys(info.topLevel).length + info.unsatisfied.length
+    );
+
+    // Install top level packages.
+    await Promise.all(
+      Object.entries(info.topLevel).map(([name, { url }]) => install(name, url))
+    );
+
+    // Install packages which have conflicts.
+    await Promise.all(
+      info.unsatisfied.map((item) =>
+        install(item.name, item.url, `/node_modules/${item.parent}`)
+      )
+    );
+
+    // Save the `package.json` file.
+    fs.writeJson(jsonPath, root, { spaces: 2 });
+
+    // That's all! Everything should be finished if no errors occurred.
   }
 }

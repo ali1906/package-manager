@@ -1,28 +1,43 @@
-import { program } from "commander";
+#!/usr/bin/env node
+import yargs from "yargs";
+import { NpmRegistryClient } from "./NpmRegistryClient";
 
-/**
- * Adds the dependency to the “dependencies” object in package.json
- *
- * Argument <package>: A "name@version" string as defined [here](https://github.com/npm/node-semver#versions)
+/*
+ * This file is for CLI usage.
+ * There isn't too much logic about package manager here.
  */
-program
-  .command("add <package>")
-  .description("Add a package")
-  .action((pkg) => {
-    // -- IMPLEMENT ADD COMMAND -- //
-    const [packageName, version] = pkg.split("@");
-  });
 
-/**
- * Resolves the full dependency list from package.json and downloads all of the required packages to the “node_modules” folder
- *
- * This command has no arguments
- */
-program
-  .command("install")
-  .description("Install dependencies")
-  .action(async () => {
-    // -- IMPLEMENT INSTALL COMMAND -- //
-  });
+yargs
+  .usage("mpm <command> [args]")
+  .version()
+  .alias("v", "version")
+  .help()
+  .alias("h", "help")
+  .command(
+    "add",
+    "add the dependencies.",
+    (argv) => {
+      argv.option("production", {
+        type: "boolean",
+        description: "Install production dependencies only.",
+      });
 
-program.parse(process.argv);
+      argv.boolean("save-dev");
+      argv.boolean("dev");
+      argv.alias("D", "dev");
+
+      return argv;
+    },
+    NpmRegistryClient.pm
+  )
+  .command(
+    "*",
+    "Install the dependencies.",
+    (argv) =>
+      argv.option("production", {
+        type: "boolean",
+        description: "Install production dependencies only.",
+      }),
+    NpmRegistryClient.pm
+  )
+  .parse();
